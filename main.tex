@@ -1,0 +1,314 @@
+% ============================================================
+%  Springer LNCS article -- upload this folder to Overleaf
+%  (New Project -> Upload Project -> select the .zip)
+%  Compiler: pdfLaTeX   |   Bibliography: BibTeX (splncs04)
+% ============================================================
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,backgrounds}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\renewcommand\UrlFont{\color{blue}\rmfamily}
+
+\begin{document}
+
+\title{ChargeShield: Verifying and Overcoming Security Problems in Electric Vehicle Charging Infrastructure Beyond Existing Market Tools}
+\titlerunning{ChargeShield: Securing EV Charging Infrastructure}
+
+% ---- EDIT YOUR DETAILS HERE ----
+\author{Your Name\inst{1}}
+\authorrunning{Your Name}
+\institute{Department of Computer Engineering, Your College Name, City, India\\
+\email{your.email@college.edu}}
+% --------------------------------
+
+\maketitle
+
+\begin{abstract}
+Electric Vehicle (EV) charging infrastructure is rapidly becoming part of the critical energy grid. A modern charging station is a networked cyber-physical system that talks to the vehicle (ISO~15118), to a cloud Charging Station Management System (OCPP), to payment back-ends and to the power grid. Each of these links introduces security problems: exposed management interfaces discoverable through network reconnaissance, weak or absent public-key infrastructure, plaintext protocol messages, firmware tampering and wireless disruption of the charging session. In this article we first \emph{verify} these problems by mapping them onto the classical attack life-cycle of reconnaissance, scanning, gaining access and maintaining access. We then review the existing market tools---port scanners, internet-wide search engines, vulnerability scanners, signature-based IDS and generic SIEM platforms---and show that they are largely protocol-unaware and therefore fail to detect EV-specific attacks. Finally, we propose \textbf{ChargeShield}, a layered defence framework that combines (i) elliptic-curve based mutual authentication and certificate lifecycle management, (ii) an OCPP/ISO~15118 protocol-aware deep packet inspection engine, (iii) unsupervised anomaly detection on charging telemetry and (iv) a zero-trust policy layer. We compare ChargeShield qualitatively against current tools and outline an evaluation methodology.
+
+\keywords{EV charging security \and OCPP \and ISO 15118 \and Public-key cryptography \and Network reconnaissance \and Intrusion detection \and Zero trust.}
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+% ============================================================
+The transition to electric mobility is turning charging stations into one of the fastest-growing classes of internet-connected devices. Unlike a fuel pump, an Electric Vehicle Supply Equipment (EVSE) unit is a small computer: it runs an embedded operating system, holds cryptographic credentials, communicates with a back-end over the Open Charge Point Protocol (OCPP)~\cite{ocpp201}, negotiates with the car using ISO~15118~\cite{iso15118}, processes user payments and directly controls high-power electrical flows. A compromise of this ecosystem therefore has consequences far beyond data theft: attackers can steal energy, deny service to drivers, harvest payment credentials, or---by switching thousands of chargers simultaneously---destabilise the local power grid~\cite{johnson2022review,antoun2020detailed}.
+
+The basic security goals taught in any information-security course---Confidentiality, Integrity and Availability (the CIA triad), together with authentication, non-repudiation and access control~\cite{stallings2017}---map directly onto this domain. Confidentiality protects driver identities and payment tokens; integrity protects meter values, tariffs and firmware; availability guarantees that a driver can actually charge; authentication ensures that only legitimate stations, vehicles and back-ends participate.
+
+In practice, however, many deployments violate these goals. Researchers have shown that OCPP~1.6, still the most widely deployed version, may run over unencrypted WebSockets with only HTTP Basic authentication~\cite{alcaraz2017ocpp}; that the power-line communication between the car and the charger leaks information and can be eavesdropped~\cite{baker2019losing}; and that a cheap software-defined radio can abort charging sessions of entire parking lots from a distance~\cite{kohler2023brokenwire}.
+
+At the same time, the security market offers a large set of general-purpose tools: Nmap~\cite{lyon2009nmap}, Shodan~\cite{matherly2015shodan}, Nessus/OpenVAS, Wireshark, Snort~\cite{roesch1999snort}, Zeek~\cite{paxson1999bro} and commercial SIEM platforms. These tools are excellent at what they were designed for---IT networks speaking HTTP, SMB, SSH and DNS---but they have little or no understanding of the semantics of OCPP or ISO~15118 messages. A forged \texttt{MeterValues} report or a malicious \texttt{UpdateFirmware} command is, for a signature-based IDS, just another well-formed JSON message inside a TLS WebSocket.
+
+\paragraph{Contributions.} This article makes three contributions:
+\begin{enumerate}
+  \item It \textbf{verifies} the security problems of EV charging infrastructure by systematically mapping them onto the attacker life-cycle (reconnaissance $\rightarrow$ scanning $\rightarrow$ gaining access $\rightarrow$ maintaining access $\rightarrow$ covering tracks).
+  \item It \textbf{reviews} the literature and the existing market tools, and identifies concrete gaps where these tools fail for this domain.
+  \item It \textbf{proposes} ChargeShield, a layered framework built on public-key cryptography, protocol-aware inspection, machine-learning anomaly detection and zero-trust principles, and explains how it overcomes each identified gap.
+\end{enumerate}
+
+The remainder of the paper is organised as follows. Section~\ref{sec:background} describes the EV charging architecture. Section~\ref{sec:problems} verifies the security problems. Section~\ref{sec:lit} reviews the literature and existing tools. Section~\ref{sec:tech} presents the technologies used in ChargeShield. Section~\ref{sec:eval} compares it with existing tools, and Section~\ref{sec:conc} concludes.
+
+% ============================================================
+\section{Background: The EV Charging Ecosystem}\label{sec:background}
+% ============================================================
+Figure~\ref{fig:arch} shows the main actors. The \emph{Electric Vehicle} (EV) connects to the \emph{charging station} (EVSE) through a cable; for DC fast charging under the Combined Charging System (CCS), high-level communication runs as HomePlug Green PHY power-line communication carrying ISO~15118 or DIN~70121 messages~\cite{iso15118}. The EVSE connects over cellular or Ethernet to a \emph{Charging Station Management System} (CSMS), usually operated by a Charge Point Operator (CPO), using OCPP over WebSockets~\cite{ocpp201}. The CSMS in turn talks to e-Mobility Service Providers (eMSPs), roaming hubs, payment processors and the Distribution System Operator (DSO) that manages grid load.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=0.6cm and 1.0cm,
+  box/.style={draw, rounded corners, minimum width=2.1cm, minimum height=0.85cm, align=center, font=\footnotesize, fill=blue!6},
+  atk/.style={draw=red!70!black, fill=red!8, rounded corners, font=\scriptsize, align=center, inner sep=2pt},
+  arr/.style={-{Latex[length=2mm]}, thick},
+  lbl/.style={font=\scriptsize, midway, above}
+]
+\node[box] (ev) {Electric\\Vehicle};
+\node[box, right=1.6cm of ev] (evse) {Charging\\Station (EVSE)};
+\node[box, right=1.6cm of evse] (csms) {CSMS\\(Cloud)};
+\node[box, above=0.7cm of csms] (pay) {Payment /\\eMSP};
+\node[box, below=0.7cm of csms] (dso) {Grid\\Operator (DSO)};
+
+\draw[arr, <->] (ev) -- node[lbl]{ISO 15118} node[font=\scriptsize, midway, below]{(PLC)} (evse);
+\draw[arr, <->] (evse) -- node[lbl]{OCPP} node[font=\scriptsize, midway, below]{(WebSocket)} (csms);
+\draw[arr, <->] (csms) -- (pay);
+\draw[arr, <->] (csms) -- (dso);
+
+\node[atk, below=0.55cm of ev] (a1) {A1: PLC sniffing,\\wireless jamming};
+\node[atk, below=0.55cm of evse] (a2) {A2: physical / USB /\\firmware tampering};
+\node[atk, above=0.55cm of evse] (a3) {A3: recon via Shodan,\\exposed admin ports};
+\node[atk, left=0.4cm of pay] (a4) {A4: MITM, forged\\OCPP messages};
+\end{tikzpicture}
+\caption{EV charging architecture and the main attack surfaces (A1--A4).}
+\label{fig:arch}
+\end{figure}
+
+Two protocol generations co-exist in the field. OCPP~1.6 defines security only through optional profiles added later, while OCPP~2.0.1 introduces three security profiles: (1) HTTP Basic authentication without TLS, (2) TLS with Basic authentication, and (3) TLS with mutual client-certificate authentication~\cite{ocpp201}. ISO~15118-2 introduces \emph{Plug \& Charge}, in which the vehicle itself holds an X.509 contract certificate and authenticates automatically, backed by a multi-root V2G public-key infrastructure~\cite{iso15118}. In practice, a large fraction of deployed stations still runs Profile~1 or legacy OCPP~1.6 without TLS, because the certificate management burden is high and many back-ends do not support it.
+
+% ============================================================
+\section{Verifying the Security Problems}\label{sec:problems}
+% ============================================================
+To verify that the problems are real and not merely theoretical, we organise them according to the five phases of an attack used in ethical hacking methodology: reconnaissance, scanning, gaining access, maintaining access and covering tracks. For each phase we describe how an attacker would proceed against a charging network and cite published evidence.
+
+\subsection{Phase 1: Reconnaissance (Footprinting)}
+Passive reconnaissance collects information without touching the target. For EV infrastructure this is unusually easy: public charging maps and roaming platforms publish the exact location, vendor, model and connector type of every station. Internet-wide search engines such as Shodan and Censys, built on fast scanners like ZMap~\cite{durumeric2013zmap}, index banners of embedded web servers, Telnet/SSH services and OCPP endpoints. An attacker can therefore build a target list of a particular vendor and firmware version without sending a single packet to the victim. Johnson et al.\ report numerous chargers with internet-exposed management interfaces in their review of EV charger vulnerabilities~\cite{johnson2022review}.
+
+\subsection{Phase 2: Scanning and Enumeration}
+Active scanning with tools such as Nmap~\cite{lyon2009nmap} (TCP SYN scans, service/version detection with \texttt{-sV}, OS fingerprinting with \texttt{-O}) reveals open ports such as 22 (SSH), 23 (Telnet), 80/443 (web configuration UI), 502 (Modbus for local energy management) and the OCPP WebSocket port. Enumeration then identifies default credentials, outdated BusyBox or OpenSSL versions and exposed debugging services. Gottumukkala et al.\ performed exactly this type of assessment on real charging stations and found weak authentication and unnecessary open services~\cite{gottumukkala2019cyber}.
+
+\subsection{Phase 3: Gaining Access}
+Several verified vectors exist:
+\begin{itemize}
+  \item \textbf{Protocol-level attacks on OCPP.} Without TLS (Profile~1 or legacy 1.6), the CSMS identifies a charger only by its \texttt{ChargePointId} in the URL plus a static password. An attacker who learns these values can impersonate the charger, inject false \texttt{MeterValues} (billing fraud), or impersonate the CSMS and issue \texttt{RemoteStartTransaction}, \texttt{ChangeConfiguration} or \texttt{UpdateFirmware} commands~\cite{alcaraz2017ocpp}.
+  \item \textbf{Vehicle-side attacks.} Baker and Martinovic showed that the HomePlug Green PHY signal used by CCS leaks electromagnetically and can be eavesdropped from a neighbouring parking bay, exposing session data~\cite{baker2019losing}.
+  \item \textbf{Physical access.} Chargers are unattended; exposed USB or debug ports allow local firmware extraction or modification~\cite{antoun2020detailed,johnson2022review}.
+  \item \textbf{Weak cryptography.} Hard-coded keys, self-signed certificates that are never validated, and the absence of certificate revocation checking break the trust chain even when TLS is nominally enabled.
+\end{itemize}
+
+\subsection{Phase 4: Maintaining Access}
+Once a station is compromised, the attacker can install a modified firmware image that survives reboots (persistence), add backdoor accounts, or pivot from the station into the CPO's back-end network. Because thousands of stations of the same model run identical firmware, a single exploit scales into a botnet capable of coordinated load manipulation---a threat to grid stability discussed in~\cite{johnson2022review,antoun2020detailed}.
+
+\subsection{Phase 5: Covering Tracks and Denial of Service}
+Embedded devices usually keep limited local logs that can be erased, and many CSMS platforms do not forward logs to a central SIEM. Separately, \emph{Brokenwire} demonstrated that the CCS charging session can be terminated wirelessly from up to tens of metres using inexpensive radio equipment, a pure availability attack that leaves no trace in the network logs~\cite{kohler2023brokenwire}.
+
+\subsection{Summary of Verified Problems}
+Table~\ref{tab:problems} summarises the verified problems and the security goal each one violates.
+
+\begin{table}[t]
+\centering
+\caption{Verified security problems in EV charging and the violated security goal.}
+\label{tab:problems}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l X l l@{}}
+\toprule
+\textbf{ID} & \textbf{Problem} & \textbf{Phase} & \textbf{Goal violated}\\
+\midrule
+P1 & Station details and exposed services indexed publicly & Recon & Confidentiality \\
+P2 & Default / static credentials, unnecessary open ports & Scanning & Authentication \\
+P3 & OCPP without TLS; spoofed charger or CSMS & Access & Integrity, Auth.\\
+P4 & Forged meter values and tariffs (billing fraud) & Access & Integrity \\
+P5 & Unsigned or unverified firmware updates & Maintain & Integrity \\
+P6 & Weak PKI: no revocation, hard-coded keys & Access & Authentication \\
+P7 & PLC eavesdropping and wireless session disruption & Access/DoS & Conf., Availability \\
+P8 & Coordinated load switching via botnet & Maintain & Availability \\
+P9 & Poor logging, no central monitoring & Cover tracks & Non-repudiation \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================
+\section{Literature Review and Existing Market Tools}\label{sec:lit}
+% ============================================================
+\subsection{Academic Literature}
+\textbf{Protocol security analyses.} Alcaraz, Lopez and Wolthusen~\cite{alcaraz2017ocpp} provided one of the first systematic analyses of OCPP, identifying man-in-the-middle, impersonation and data-manipulation threats, and highlighted that OCPP~1.5/1.6 did not mandate transport security. Their work motivated the security profiles later added to OCPP~2.0.1~\cite{ocpp201}.
+
+\textbf{Ecosystem assessments.} Antoun et al.~\cite{antoun2020detailed} assessed the complete ecosystem---vehicle, charger, CSMS, mobile apps---and showed that weaknesses in any one component compromise the whole chain. Johnson et al.~\cite{johnson2022review} from Sandia National Laboratories reviewed publicly reported charger vulnerabilities and grouped defences into recommendations for vendors, operators and utilities. Gottumukkala et al.~\cite{gottumukkala2019cyber} conducted hands-on penetration tests of commercial stations.
+
+\textbf{Physical-layer attacks.} Baker and Martinovic~\cite{baker2019losing} and K\"ohler et al.~\cite{kohler2023brokenwire} showed that the physical communication layer of CCS is itself vulnerable to eavesdropping and disruption, which no network-layer tool can detect.
+
+\textbf{Intrusion detection research.} Signature-based IDS such as Snort~\cite{roesch1999snort} and policy-based monitors such as Bro/Zeek~\cite{paxson1999bro} are the foundation of network monitoring. Machine-learning based detectors, for example the autoencoder ensemble Kitsune~\cite{mirsky2018kitsune} and tree-based Isolation Forest~\cite{liu2008isolation}, can detect previously unseen attacks. However, Sommer and Paxson~\cite{sommer2010outside} warned that ML-based detectors suffer high false-positive rates when they lack domain semantics---an argument for combining ML with protocol awareness.
+
+\textbf{Cryptographic foundations.} The public-key schemes underpinning V2G PKI rest on the work of Diffie and Hellman~\cite{diffie1976new}, RSA~\cite{rivest1978method} and elliptic-curve cryptography~\cite{koblitz1987elliptic}; TLS~1.3~\cite{rfc8446} provides the modern transport layer. Industrial guidance such as NIST SP~800-82~\cite{nist80082} and the zero-trust architecture of NIST SP~800-207~\cite{nist800207} gives the organisational framework.
+
+\subsection{Existing Market Tools and Their Limitations}
+Table~\ref{tab:tools} lists the tools most commonly used by security teams today and evaluates their fitness for EV charging infrastructure.
+
+\begin{table}[t]
+\centering
+\caption{Existing market tools and their limitations for EV charging security.}
+\label{tab:tools}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l l X@{}}
+\toprule
+\textbf{Tool} & \textbf{Category} & \textbf{Limitation in the EV domain}\\
+\midrule
+Nmap & Port scanner & Finds open ports, but has no OCPP/ISO~15118 fingerprints; cannot judge security profile in use.\\
+Shodan / Censys & Internet search & Used \emph{by attackers} for recon; defenders get only point-in-time exposure, no remediation.\\
+Nessus / OpenVAS & Vuln. scanner & Checks generic CVEs (OpenSSL, BusyBox); no tests for insecure OCPP configuration or unsigned firmware workflow.\\
+Wireshark & Packet analyser & Manual, offline; cannot see inside TLS; no PLC (HomePlug GP) capture without special hardware.\\
+Snort / Suricata & Signature IDS & Rules match bytes, not semantics; a forged but well-formed \texttt{MeterValues} message is not detected; blind to unknown attacks.\\
+Zeek & Network monitor & Scriptable, but no built-in OCPP analyser; requires heavy custom development.\\
+Commercial SIEM & Log correlation & Only as good as the logs fed to it; most chargers do not export security events.\\
+Generic PKI / CA & Certificate mgmt. & Not aware of the multi-root V2G PKI hierarchy, contract certificates or offline revocation constraints.\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent From this review we derive four \textbf{gaps}:
+\begin{description}
+  \item[G1 -- Protocol blindness.] Existing tools do not understand OCPP and ISO~15118 semantics.
+  \item[G2 -- Weak identity.] Generic PKI tooling does not manage the device and contract certificate lifecycle for thousands of field devices.
+  \item[G3 -- Unknown attacks.] Signature-based detection misses novel attacks such as subtle meter-value manipulation or coordinated load switching.
+  \item[G4 -- Implicit trust.] Perimeter-based architectures trust any device that is ``inside'' the CPO network, enabling lateral movement after one charger is compromised.
+\end{description}
+
+% ============================================================
+\section{Technology Used to Solve the Problems: ChargeShield}\label{sec:tech}
+% ============================================================
+To close gaps G1--G4 we propose ChargeShield, a four-layer framework (Fig.~\ref{fig:chargeshield}). Each layer uses a well-established technology, but their combination and domain-specific adaptation is what existing tools lack.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  layer/.style={draw, rounded corners, minimum width=10.5cm, minimum height=0.9cm, align=center, font=\footnotesize},
+  node distance=0.18cm
+]
+\node[layer, fill=green!10] (l4) {\textbf{L4 -- Zero-Trust Policy Engine}: per-request authorisation, micro-segmentation, risk score $\rightarrow$ response};
+\node[layer, fill=orange!10, below=of l4] (l3) {\textbf{L3 -- Anomaly Detection}: Isolation Forest + autoencoder on charging telemetry and message sequences};
+\node[layer, fill=yellow!15, below=of l3] (l2) {\textbf{L2 -- Protocol-Aware DPI}: OCPP / ISO 15118 parser, state machine and semantic rule checks};
+\node[layer, fill=blue!8, below=of l2] (l1) {\textbf{L1 -- Cryptographic Identity}: ECC mutual TLS 1.3, V2G PKI, OCSP, signed firmware};
+\node[font=\scriptsize, align=center, below=0.25cm of l1] {EVSE fleet \quad$\leftrightarrow$\quad CSMS \quad$\leftrightarrow$\quad Vehicles};
+\end{tikzpicture}
+\caption{The four layers of ChargeShield. Lower layers prevent attacks; upper layers detect and respond.}
+\label{fig:chargeshield}
+\end{figure}
+
+\subsection{Layer 1: Public-Key Cryptography and Identity (closes G2)}
+\textbf{Mutual authentication.} Every charger receives a unique key pair generated inside a secure element or TPM at manufacturing, so the private key never leaves the hardware. We enforce OCPP Security Profile~3: TLS~1.3~\cite{rfc8446} with mutual X.509 authentication. Elliptic-curve cryptography~\cite{koblitz1987elliptic} (ECDSA over P-256 for signatures, ECDHE for key agreement) is preferred over RSA~\cite{rivest1978method} because it gives equivalent security with much smaller keys---a 256-bit ECC key offers security comparable to a 3072-bit RSA key---which matters on low-power embedded controllers.
+
+The ephemeral Diffie--Hellman exchange~\cite{diffie1976new} provides \emph{forward secrecy}: given a curve point $G$ of order $n$, the charger chooses a random $a \in [1,n-1]$ and sends $A=aG$; the CSMS chooses $b$ and sends $B=bG$; both derive the shared secret
+\begin{equation}
+K = aB = bA = abG,
+\end{equation}
+from which TLS~1.3 derives session keys. Because $a$ and $b$ are discarded after the handshake, recording traffic today and stealing a long-term key tomorrow does not reveal past sessions.
+
+\textbf{Certificate lifecycle.} ChargeShield adds an automated certificate manager that (i) issues short-lived certificates (e.g.\ 90 days) to reduce the impact of key compromise, (ii) renews them through the OCPP~2.0.1 \texttt{SignCertificate}/\texttt{CertificateSigned} messages, and (iii) checks revocation through OCSP stapling, so that a charger with intermittent connectivity can still prove its status. For Plug \& Charge, the manager supports the multi-root V2G PKI defined by ISO~15118.
+
+\textbf{Signed firmware.} Every firmware image is hashed with SHA-256 and signed by the vendor's code-signing key: $\sigma = \mathrm{Sign}_{sk_v}(H(\mathit{fw}))$. The bootloader verifies $\mathrm{Verify}_{pk_v}(H(\mathit{fw}),\sigma)$ before execution (secure boot), and the CSMS verifies it before distribution. This removes problem P5 and the persistence vector of Phase~4.
+
+\subsection{Layer 2: Protocol-Aware Deep Packet Inspection (closes G1)}
+Because TLS hides the payload from network IDS, the inspection engine is deployed \emph{at the CSMS ingress} (as a WebSocket reverse proxy) where messages are already decrypted. It parses each OCPP-J frame \texttt{[MessageTypeId, UniqueId, Action, Payload]} and performs three kinds of checks:
+\begin{enumerate}
+  \item \textbf{Schema validation} against the official OCPP JSON schemas, rejecting malformed or oversized fields (defeating injection and parser bugs).
+  \item \textbf{State-machine validation}: the engine tracks the charger's state (\emph{Available} $\rightarrow$ \emph{Preparing} $\rightarrow$ \emph{Charging} $\rightarrow$ \emph{Finishing}) and flags out-of-order messages, e.g.\ \texttt{MeterValues} for a transaction that was never started.
+  \item \textbf{Semantic rules}: physics-based plausibility checks, such as energy registers that must be monotonically increasing and delivered power that cannot exceed the connector's rated power.
+\end{enumerate}
+Algorithm~\ref{alg:dpi} sketches the core loop.
+
+\begin{algorithm}[t]
+\caption{ChargeShield protocol-aware inspection of an OCPP message}
+\label{alg:dpi}
+\footnotesize
+\begin{algorithmic}[1]
+\Require message $m$ from charger $c$, state table $S$, rated power $P_{\max}(c)$
+\If{$\neg \mathrm{ValidSchema}(m)$} \State \Return \textsc{Block}("schema") \EndIf
+\If{$m.\mathit{action} \notin \mathrm{Allowed}(S[c])$} \State \Return \textsc{Alert}("state violation") \EndIf
+\If{$m.\mathit{action} = \texttt{MeterValues}$}
+  \State $\Delta E \gets m.E - S[c].E_{\mathrm{last}}$;\quad $\Delta t \gets m.t - S[c].t_{\mathrm{last}}$
+  \If{$\Delta E < 0$ \textbf{or} $\Delta E/\Delta t > P_{\max}(c)$} \State \Return \textsc{Alert}("implausible energy") \EndIf
+\EndIf
+\State $S[c] \gets \mathrm{Update}(S[c], m)$
+\State \textbf{send} feature vector $x(m, S[c])$ to Layer 3
+\State \Return \textsc{Forward}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Layer 3: Machine-Learning Anomaly Detection (closes G3)}
+Rules catch known misbehaviour; to catch unknown attacks we add unsupervised learning, which does not need labelled attack data (which is scarce in this domain). For each charger and time window we build a feature vector $x$ containing: message rate per action type, inter-arrival times, session duration, energy delivered, power profile statistics, number of authentication failures, and configuration-change frequency.
+
+Two complementary models are trained on normal operation:
+\begin{itemize}
+  \item An \textbf{Isolation Forest}~\cite{liu2008isolation}, which isolates anomalies with few random splits; the anomaly score is $s(x,n)=2^{-E[h(x)]/c(n)}$, where $h(x)$ is the path length and $c(n)$ the average path length for $n$ samples. Scores close to 1 indicate anomalies.
+  \item An \textbf{autoencoder} in the spirit of Kitsune~\cite{mirsky2018kitsune}, which learns to reconstruct normal message sequences; a high reconstruction error $\lVert x-\hat{x}\rVert_2$ indicates deviation.
+\end{itemize}
+A fleet-level detector additionally correlates events across stations: many chargers simultaneously receiving \texttt{SetChargingProfile} commands that sharply change load is flagged as a potential coordinated grid attack (problem P8). Following the advice of Sommer and Paxson~\cite{sommer2010outside}, alerts from Layer~3 are always enriched with the protocol context from Layer~2, which makes them explainable to an operator and reduces false positives.
+
+\subsection{Layer 4: Zero-Trust Policy Engine (closes G4)}
+Following NIST SP~800-207~\cite{nist800207}, no charger, operator or API client is trusted because of its network location. Each request is authorised by a policy engine that considers the identity (from Layer~1), the requested action, and the current risk score (from Layers~2 and~3). High-impact commands---\texttt{UpdateFirmware}, \texttt{ChangeConfiguration}, \texttt{Reset}, fleet-wide \texttt{SetChargingProfile}---require additional operator approval (two-person rule) and are rate-limited. Chargers are micro-segmented so that a compromised station can reach only the CSMS endpoint, preventing lateral movement. Automated responses range from raising an alert, to quarantining a charger (revoking its certificate via Layer~1), to switching it into a safe local-only mode.
+
+\subsection{Handling Reconnaissance and Physical-Layer Threats}
+ChargeShield turns the attacker's reconnaissance tools into defensive ones: a scheduled \emph{exposure monitor} queries internet-scan data for the operator's IP ranges and runs authenticated Nmap/OpenVAS scans with EV-specific scripts (e.g.\ detecting OCPP Profile~1 endpoints or Telnet), feeding findings into the risk score. Against PLC eavesdropping and Brokenwire-style disruption~\cite{baker2019losing,kohler2023brokenwire}, purely network-based defences are insufficient; ChargeShield therefore logs unexpected session aborts as security events, so that clusters of aborts at one site are detected as a likely radio attack, and recommends ISO~15118-20 TLS for the vehicle link plus cable shielding as physical mitigations.
+
+% ============================================================
+\section{Comparison and Evaluation Methodology}\label{sec:eval}
+% ============================================================
+Table~\ref{tab:compare} compares ChargeShield with existing tools against the problems verified in Section~\ref{sec:problems}.
+
+\begin{table}[t]
+\centering
+\caption{Coverage of verified problems: existing tools vs.\ ChargeShield ($\checkmark$ = addressed, $\circ$ = partially, -- = not addressed).}
+\label{tab:compare}
+\footnotesize
+\begin{tabular}{@{}l c c c c c@{}}
+\toprule
+\textbf{Problem} & \textbf{Nmap/Shodan} & \textbf{Nessus} & \textbf{Snort/Suricata} & \textbf{SIEM} & \textbf{ChargeShield}\\
+\midrule
+P1 Public exposure       & $\circ$ & -- & -- & -- & $\checkmark$ \\
+P2 Default creds/ports   & $\circ$ & $\checkmark$ & -- & -- & $\checkmark$ \\
+P3 Spoofed charger/CSMS  & -- & -- & $\circ$ & -- & $\checkmark$ \\
+P4 Forged meter values   & -- & -- & -- & $\circ$ & $\checkmark$ \\
+P5 Unsigned firmware     & -- & $\circ$ & -- & -- & $\checkmark$ \\
+P6 Weak PKI              & -- & $\circ$ & -- & -- & $\checkmark$ \\
+P7 PLC/wireless attacks  & -- & -- & -- & -- & $\circ$ \\
+P8 Coordinated load attack & -- & -- & -- & $\circ$ & $\checkmark$ \\
+P9 Logging / forensics   & -- & -- & $\circ$ & $\checkmark$ & $\checkmark$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Proposed Evaluation}
+We propose evaluating ChargeShield on a testbed built from open-source components: a simulated charger fleet using an open-source OCPP charge-point simulator, an open-source CSMS such as SteVe or CitrineOS, and the ChargeShield proxy in between. The following attack scenarios would be replayed: (i) charger impersonation with stolen \texttt{ChargePointId}; (ii) meter-value manipulation with gradual drift; (iii) malicious firmware push; (iv) fleet-wide charging-profile manipulation; and (v) reconnaissance scans. For each scenario the detection rate, false-positive rate and added latency per message would be measured and compared with Suricata running community rules on the same traffic. Because L2 runs inline, its per-message latency must remain well below OCPP's typical call timeouts of several seconds, which is achievable since JSON-schema checks and state lookups are $O(1)$ per message.
+
+\subsection{Limitations}
+ChargeShield depends on chargers supporting OCPP~2.0.1 Security Profile~3; legacy OCPP~1.6 hardware may need a gateway or replacement. The ML layer requires a clean training period and must be retrained when tariffs or usage patterns change. Physical-layer attacks can be detected but not fully prevented by software. Finally, the evaluation in this article is a methodology; a quantitative study on a real deployment is left as future work.
+
+% ============================================================
+\section{Conclusion}\label{sec:conc}
+% ============================================================
+EV charging infrastructure combines IT, operational technology and the power grid, and inherits the weaknesses of all three. By following the attacker life-cycle we verified nine concrete problems, from public reconnaissance exposure to coordinated load-switching attacks, all supported by published research. Existing market tools---scanners, vulnerability assessors, signature IDS and SIEMs---are valuable but protocol-blind, signature-bound, weak on device identity and based on implicit trust. The proposed ChargeShield framework overcomes these gaps by combining ECC-based mutual authentication and certificate lifecycle management, OCPP/ISO~15118-aware inspection, unsupervised anomaly detection and a zero-trust policy engine. Future work includes a prototype implementation, quantitative evaluation on a hardware testbed, and extending the approach to vehicle-to-grid (V2G) bidirectional charging, where the attack impact on the grid is even greater.
+
+% ---- References ----
+\bibliographystyle{splncs04}
+\bibliography{references}
+
+\end{document}
