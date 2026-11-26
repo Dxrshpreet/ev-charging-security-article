@@ -13,8 +13,34 @@
 \usetikzlibrary{arrows.meta,positioning}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{upquote}
 \usepackage{hyperref}
 \renewcommand\UrlFont{\color{blue}\rmfamily}
+
+% ---- syntax highlighting for the code appendix ----
+\definecolor{codebg}{RGB}{247,247,249}
+\definecolor{codekw}{RGB}{0,0,170}
+\definecolor{codestr}{RGB}{160,32,32}
+\definecolor{codecom}{RGB}{0,120,60}
+\definecolor{codenum}{RGB}{140,140,140}
+\lstdefinestyle{py}{
+  language=Python,
+  basicstyle=\ttfamily\scriptsize,
+  keywordstyle=\color{codekw}\bfseries,
+  stringstyle=\color{codestr},
+  commentstyle=\color{codecom}\itshape,
+  morekeywords={self,True,False,None,as,with,yield,lambda},
+  backgroundcolor=\color{codebg},
+  numbers=left, numberstyle=\tiny\color{codenum}, numbersep=6pt,
+  frame=single, rulecolor=\color{codenum!60},
+  breaklines=true, breakatwhitespace=false,
+  postbreak=\mbox{\textcolor{codenum}{$\hookrightarrow$}\space},
+  showstringspaces=false, columns=fullflexible, keepspaces=true,
+  tabsize=4, xleftmargin=1.5em, framexleftmargin=1.5em
+}
+\lstset{style=py}
 
 \begin{document}
 
@@ -22,8 +48,8 @@
 \titlerunning{Securing EV Charging Infrastructure}
 
 % ---- EDIT YOUR DETAILS HERE ----
-\author{Your Name}
-\authorrunning{Your Name}
+\author{Dxrshpreet}
+\authorrunning{Dxrshpreet}
 \institute{Department of Computer Science and Engineering\\
 Your College Name\\
 India}
@@ -415,5 +441,48 @@ The proposed ChargeShield approach addresses these gaps with four layers: ECC-ba
 % ---- References ----
 \bibliographystyle{splncs04}
 \bibliography{references}
+
+% ============================================================
+\appendix
+\section{Prototype Source Code}\label{app:code}
+% ============================================================
+This appendix contains the complete source code of the ChargeShield prototype used for the evaluation in Section~7. The code is also available at \url{https://github.com/Dxrshpreet/ev-charging-security-article}. It requires Python~3 with \texttt{numpy}, \texttt{scikit-learn} and \texttt{cryptography}, and is run with:
+\begin{lstlisting}[language=bash,numbers=none]
+cd prototype
+pip install -r requirements.txt
+python demo.py --seed 7
+\end{lstlisting}
+
+\begin{table}[h]
+\centering
+\caption{Prototype files and the paper section each one implements}
+\footnotesize
+\begin{tabularx}{\textwidth}{@{}l X@{}}
+\toprule
+\textbf{File} & \textbf{Purpose}\\
+\midrule
+\texttt{simulator.py} & Generates synthetic OCPP traffic and injects labelled attacks (Experimental Design)\\
+\texttt{identity.py} & ECDHE key agreement and signed firmware (Layer~1)\\
+\texttt{inspector.py} & Schema, state and plausibility checks, Algorithm~\ref{alg:dpi} (Layer~2), and the syntax-only baseline\\
+\texttt{detector.py} & Isolation Forest, robust range check (Layer~3) and fleet correlation\\
+\texttt{demo.py} & Runs all layers, prints Layer~4 responses and computes the metrics\\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Traffic Simulator (\texttt{chargeshield/simulator.py})}
+\lstinputlisting{prototype/chargeshield/simulator.py}
+
+\subsection{Layer 1: Cryptographic Identity (\texttt{chargeshield/identity.py})}
+\lstinputlisting{prototype/chargeshield/identity.py}
+
+\subsection{Layer 2: Protocol-Aware Inspection (\texttt{chargeshield/inspector.py})}
+\lstinputlisting{prototype/chargeshield/inspector.py}
+
+\subsection{Layer 3: Anomaly Detection (\texttt{chargeshield/detector.py})}
+\lstinputlisting{prototype/chargeshield/detector.py}
+
+\subsection{Evaluation Runner (\texttt{demo.py})}
+\lstinputlisting{prototype/demo.py}
 
 \end{document}
