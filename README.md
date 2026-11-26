@@ -43,3 +43,7 @@ pdflatex main && bibtex main && pdflatex main && pdflatex main
 ## Keywords
 
 EV charging security · OCPP · ISO 15118 · Public-key cryptography · Network reconnaissance · Intrusion detection · Zero trust
+
+## Prototype code
+
+The [`prototype/`](prototype/) folder holds a runnable Python proof of concept of ChargeShield. It covers ECDHE and signed firmware, OCPP protocol-aware inspection, Isolation Forest anomaly detection and fleet correlation, all run on synthetic OCPP traffic. To run it: `cd prototype && pip install -r requirements.txt && python demo.py`.
