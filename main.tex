@@ -34,7 +34,7 @@ India}
 \begin{abstract}
 Electric Vehicle (EV) charging stations are becoming part of the critical energy infrastructure. A modern charging station is a networked computer that communicates with the vehicle using ISO~15118, with a cloud management system using the Open Charge Point Protocol (OCPP), and indirectly with payment systems and the power grid. These connections introduce security problems such as publicly exposed management interfaces, unencrypted protocol messages, forged meter readings, unsigned firmware updates and wireless disruption of charging sessions.
 
-This paper first verifies these problems by mapping them onto the phases of an attack: reconnaissance, scanning, gaining access, maintaining access and covering tracks. It then analyses existing security tools such as Nmap, Shodan, Nessus, Wireshark, Snort and SIEM platforms, and shows that they are largely protocol-unaware for this domain. Finally, a layered approach called ChargeShield is proposed. It combines elliptic-curve based mutual authentication, OCPP-aware message inspection, unsupervised anomaly detection on charging data, and a zero-trust policy layer. The paper also defines evaluation metrics and an experimental design for testing the approach.
+This paper first verifies these problems by mapping them onto the phases of an attack: reconnaissance, scanning, gaining access, maintaining access and covering tracks. It then analyses existing security tools such as Nmap, Shodan, Nessus, Wireshark, Snort and SIEM platforms, and shows that they are largely protocol-unaware for this domain. Finally, a layered approach called ChargeShield is proposed. It combines elliptic-curve based mutual authentication, OCPP-aware message inspection, unsupervised anomaly detection on charging data, and a zero-trust policy layer. A Python prototype was evaluated on ten simulated days of synthetic OCPP traffic from twenty chargers. In this evaluation, the protocol-aware layer detected all forged messages without false alarms, while a syntax-only baseline detected one quarter of them. The behavioural layer detected all simulated misuse windows with a false positive rate of about 0.5\%.
 
 \keywords{EV Charging Security \and OCPP \and ISO 15118 \and Public-Key Cryptography \and Intrusion Detection \and Anomaly Detection \and Zero Trust}
 \end{abstract}
@@ -271,6 +271,13 @@ e(x) = \lVert x - \hat{x} \rVert_2
 \end{equation}
 is used as an anomaly score, where $\hat{x}$ is the reconstructed input. A high error means that the behaviour is different from normal.
 
+\subsection{Robust Range Check}
+Isolation Forest only splits within the range of values seen during training, so a value far outside that range is not isolated faster than the most extreme normal sample. To cover this case, each feature $j$ is also compared with its normal median $\mathrm{med}_j$ using a robust z-score based on the median absolute deviation (MAD):
+\begin{equation}
+z_j(x) = \frac{x_j - \mathrm{med}_j}{\max(1.4826 \cdot \mathrm{MAD}_j,\ 1)}.
+\end{equation}
+A window is flagged if $z_j(x) > 6$ for any feature, or if the Isolation Forest score is below the 0.5th percentile of the training scores.
+
 \subsection{Fleet-Level Correlation}
 Some attacks only become visible when many chargers are observed together. If a large number of chargers receive sudden \texttt{SetChargingProfile} changes within a short time, the system raises an alert for a possible coordinated grid attack.
 
@@ -307,34 +314,43 @@ For EV charging, a high recall is important because a missed attack can cause fi
 % ============================================================
 \section{Experimental Design}
 % ============================================================
-A test environment can be built from open-source components: an OCPP charger simulator, an open-source CSMS such as SteVe or CitrineOS, and the ChargeShield proxy placed between them. A typical workflow is:
+A prototype of Layers~1--3, the fleet correlation and a simple Layer~4 response policy was implemented in Python using scikit-learn and the \texttt{cryptography} library. The source code is available at \url{https://github.com/Dxrshpreet/ev-charging-security-article}. The evaluation followed this workflow:
 \begin{enumerate}
-  \item Generate normal charging traffic from simulated chargers.
-  \item Train the anomaly detection models on normal traffic only.
-  \item Replay attack scenarios: charger impersonation, gradual meter manipulation, malicious firmware push, fleet-wide charging profile changes, and reconnaissance scans.
-  \item Run the same traffic through Suricata with community rules for comparison.
-  \item Calculate recall, precision, false positive rate, F1-score and latency.
-  \item Compare the results.
+  \item Generate one day of normal OCPP traffic from 20 simulated chargers (22~kW and 50~kW) as training data.
+  \item Train the Isolation Forest and the robust range check on normal traffic only.
+  \item Generate a separate test day and inject attacks with ground-truth labels: 20 forged messages (5 malformed, 5 spoofed transactions, 5 meter rollbacks, 5 physically impossible readings); 6 misuse windows (2 RFID card brute-force, 2 message floods, 2 configuration tampering); and 1 fleet-wide \texttt{SetChargingProfile} attack on 15 chargers.
+  \item Run the same traffic through a syntax-only baseline, which accepts any well-formed message, as a stand-in for a protocol-unaware detector.
+  \item Calculate recall, precision, false positive rate, F1-score and inspection time per message.
+  \item Repeat for ten simulated days (random seeds 1--10) and report the mean.
 \end{enumerate}
-An example structure for reporting results is shown in Table~\ref{tab:results}. The values should be filled in with results from the actual experiment rather than assumed values.
+Each test day contains about 20{,}000 messages and 480 charger-hour windows. Table~\ref{tab:results} shows the results.
 
 \begin{table}[t]
 \centering
-\caption{Performance comparison of detection approaches}
+\caption{Performance of the prototype on synthetic traffic (mean of 10 simulated days)}
 \label{tab:results}
 \footnotesize
 \begin{tabular}{@{}l c c c c c@{}}
 \toprule
-\textbf{Approach} & \textbf{Recall} & \textbf{Precision} & \textbf{FPR} & \textbf{F1} & \textbf{Latency}\\
+\textbf{Approach} & \textbf{Recall} & \textbf{Precision} & \textbf{FPR} & \textbf{F1} & \textbf{Time/msg}\\
 \midrule
-Suricata (community rules) & -- & -- & -- & -- & -- \\
-Layer 2 rules only & -- & -- & -- & -- & -- \\
-Isolation Forest & -- & -- & -- & -- & -- \\
-Autoencoder & -- & -- & -- & -- & -- \\
-ChargeShield (combined) & -- & -- & -- & -- & -- \\
+\multicolumn{6}{@{}l}{\emph{Per message (forged OCPP messages)}}\\
+Syntax-only baseline & 0.25 & 1.00 & 0.0000 & 0.40 & 8.5\,$\mu$s \\
+Layer 2 inspection & 1.00 & 1.00 & 0.0000 & 1.00 & 19.5\,$\mu$s \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Per charger-hour window (behavioural misuse)}}\\
+Isolation Forest only & 0.15 & 0.42 & 0.0053 & 0.21 & -- \\
+Robust range check only & 1.00 & 1.00 & 0.0000 & 1.00 & -- \\
+Layer 3 combined & 1.00 & 0.77 & 0.0053 & 0.85 & -- \\
+\midrule
+\multicolumn{6}{@{}l}{\emph{Fleet correlation:} the fleet-wide attack was detected on 10 of 10 days.}\\
 \bottomrule
 \end{tabular}
 \end{table}
+
+The syntax-only baseline detected only the malformed messages. Spoofed transactions, meter rollback and impossible energy values are well-formed JSON and passed it, whereas the state and plausibility checks of Layer~2 detected all of them. The added inspection time of about 20\,$\mu$s per message, measured on a laptop, is negligible compared with OCPP response timeouts of several seconds.
+
+In Layer~3, the Isolation Forest alone detected only 15\% of the misuse windows. This confirms the limitation described in Section~\ref{sec:models}: floods and brute-force attempts produce counts far outside the training range, which the forest does not isolate better than the most extreme normal windows. The robust range check detected all of these attacks. Combining both detectors kept a recall of 1.00, but the Isolation Forest contributed the false alarms (about 0.5\% of normal windows). For this reason, the policy layer quarantines a charger only when the range check fires, and treats an Isolation Forest-only alert as a request for operator review.
 
 % ============================================================
 \section{Discussion}
@@ -381,9 +397,11 @@ Private keys and certificate authority keys are critical assets. They must be st
 % ============================================================
 \section{Limitations and Future Work}
 % ============================================================
-The proposed approach has several limitations. It requires chargers that support OCPP~2.0.1 Security Profile~3; older OCPP~1.6 chargers would need a security gateway or replacement. The anomaly detection models depend on the quality of the training data and must be retrained when usage patterns change. Wireless and physical attacks can be detected but not fully prevented by software. In addition, the experimental evaluation has not yet been carried out.
+The proposed approach has several limitations. It requires chargers that support OCPP~2.0.1 Security Profile~3; older OCPP~1.6 chargers would need a security gateway or replacement. The anomaly detection models depend on the quality of the training data and must be retrained when usage patterns change. Wireless and physical attacks can be detected but not fully prevented by software.
 
-Future work includes building a prototype, performing the evaluation described above on a hardware test bench, and extending the approach to Vehicle-to-Grid (V2G) charging, in which vehicles can also send energy back to the grid and the possible impact of attacks is even greater.
+The prototype evaluation also has clear limits. The traffic and attacks are synthetic and fairly simple, so the results show how the layers behave rather than how they would perform on real chargers. The baseline is a simplified stand-in for a protocol-unaware detector, not a measurement of a commercial product. The simulated attacks were mostly volume-based, where a simple range check is enough; subtler attacks that combine several normal-looking values, for which the Isolation Forest is intended, were not simulated.
+
+Future work includes running Layer~2 as a live WebSocket proxy in front of an open-source CSMS such as SteVe or CitrineOS, testing it against real attack tools and a rule-based IDS such as Suricata on a hardware test bench, adding an autoencoder and subtler attack scenarios, and extending the approach to Vehicle-to-Grid (V2G) charging, in which vehicles can also send energy back to the grid and the possible impact of attacks is even greater.
 
 % ============================================================
 \section{Conclusion}
@@ -392,7 +410,7 @@ EV charging infrastructure combines information technology, embedded devices and
 
 The analysis of existing security tools showed that scanners, vulnerability assessment tools, signature-based detection systems and SIEM platforms provide valuable protection, but they do not understand charging protocols, do not manage device identity at scale, cannot detect many unknown attacks and rely on implicit trust.
 
-The proposed ChargeShield approach addresses these gaps with four layers: ECC-based mutual authentication and signed firmware, protocol-aware inspection, unsupervised anomaly detection and a zero-trust policy engine. Rather than replacing existing tools, it adds a domain-specific layer of protection that can make EV charging networks more secure.
+The proposed ChargeShield approach addresses these gaps with four layers: ECC-based mutual authentication and signed firmware, protocol-aware inspection, unsupervised anomaly detection and a zero-trust policy engine. A prototype evaluated on synthetic traffic showed that protocol-aware checks detect forged messages that a syntax-only detector misses, and that statistical range checks and Isolation Forest are complementary. Rather than replacing existing tools, ChargeShield adds a domain-specific layer of protection that can make EV charging networks more secure.
 
 % ---- References ----
 \bibliographystyle{splncs04}
